@@ -9,5 +9,5 @@
 
 3. A command example
 ```
-	$ ./do.py -v -q andrew.fa -p 97 -w 11 -e 20 23_R1.fq.gz 23_R2.fq.gz
+	$ ./do.py -v -q andrew.fa -o count.txt -p 97 -w 11 -e 20 23_R1.fq.gz 23_R2.fq.gz
 ```

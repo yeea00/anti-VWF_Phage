@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+#20200205 --output
 #20200204 initial version
 import sys, os, argparse, subprocess, hashlib, tempfile
 def get_args():
@@ -8,6 +9,7 @@ def get_args():
 	parser.add_argument("-p", "--pident-of-blast", help="only count blast result that has a pident higher than this", type=float, default=97)
 	parser.add_argument("-w", "--wordsize-of-blast", help="wordsize in blast", type=int, default=11)
 	parser.add_argument("-e", "--evalue-of-blast", help="evalue in blast", type=float, default=10)
+	parser.add_argument("-o", "--output", help="output file, - means stdout", required=True)
 	parser.add_argument("fastq", help="fastq files", nargs='+')
 	args = parser.parse_args()
 	return args
@@ -132,7 +134,7 @@ def countprint(sid, lst, frame):
 	loc_cnt = frame[one_per_seq[0][0]]
 	loc_cnt[loc] = loc_cnt.get(loc, 0) + 1
 
-def counter(blast):
+def counter(blast, output):
 	print('#count', file=sys.stderr)
 	frame = {'primer_ss':{}, 'primer_as':{}}
 	prev_read, lst = None, None
@@ -145,9 +147,14 @@ def counter(blast):
 	if len(frame['primer_ss']) < 2 or len(frame['primer_as']) < 2:
 		err(105, 'there are not enough reads in the fastq file(s)')
 	loc_range = range(min(min(frame['primer_ss'].keys()), min(frame['primer_as'].keys())), max(max(frame['primer_ss'].keys()), max(frame['primer_as'].keys())) + 1)
-	print('#LOC\tSS\tAS')
+	if output == '-':
+		fout = sys.stderr
+	else:
+		fout = open(output, 'w')
+	print('#LOC\tSS\tAS', file=fout)
 	for loc in loc_range:
-		print(loc, frame['primer_ss'].get(loc, 0), frame['primer_as'].get(loc, 0), sep='\t')
+		print(loc, frame['primer_ss'].get(loc, 0), frame['primer_as'].get(loc, 0), sep='\t', file=fout)
+	fout.close()
 
 def checkquery(filename):
 	ids = []
@@ -164,7 +171,7 @@ def main():
 	checkexe('makeblastdb', 'e958f13a0efb06c9f140b3065abd9ab6')
 	db, cnt = makeblastdb(args.verbose, args.fastq, args.query_sequence)
 	blastrtn = blastn(args.verbose, db, cnt, args.query_sequence, args.pident_of_blast, args.wordsize_of_blast, args.evalue_of_blast)
-	counter(blastrtn)
+	counter(blastrtn, args.output)
 	if args.verbose:
 		print(f'#done, remove blastdb at {db}.n*', file=sys.stderr)
 	for suffix in [ 'db', 'hr', 'in', 'ot', 'sq', 'tf', 'to']:
