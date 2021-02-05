@@ -1,16 +1,17 @@
 #!/usr/bin/python3
-#20200205 --output
+#20200205 --output, --kilo-reads-per-blast
 #20200204 initial version
 import sys, os, argparse, subprocess, hashlib, tempfile
 def get_args():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("-v", "--verbose", help="increase output verbosity", action="store_true", required=False, default=False)
 	parser.add_argument("-q", "--query-sequence", help="query sequence", required=True)
-	parser.add_argument("-p", "--pident-of-blast", help="only count blast result that has a pident higher than this", type=float, default=97)
+	parser.add_argument("-p", "--pident-of-blast", help="only count blast result that has a pident higher than N", type=float, default=97)
 	parser.add_argument("-w", "--wordsize-of-blast", help="wordsize in blast", type=int, default=11)
 	parser.add_argument("-e", "--evalue-of-blast", help="evalue in blast", type=float, default=10)
 	parser.add_argument("-o", "--output", help="output file, - means stdout", required=True)
-	parser.add_argument("fastq", help="fastq files", nargs='+')
+	parser.add_argument("-k", "--kilo-reads-per-blast", help="make a blastdb for N thousands of reads", type=int, required=True)
+	parser.add_argument("fastq", help="sequencing reads files", nargs='+')
 	args = parser.parse_args()
 	return args
 
@@ -28,11 +29,10 @@ def checkexe(exe, md5):
 		if yn.lower().strip() not in ['', 'y']:
 			sys.exit(1)
 
-def makeblastdb(verbose, filenames, query):
-	cnt, db = 0, tempfile.NamedTemporaryFile().name
-	proc = subprocess.Popen(['makeblastdb', '-in', '-', '-dbtype', 'nucl', '-title', db, '-out', db], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
-	if verbose:
-		print('#makeblastdb', file=sys.stderr)
+def blast_frag(verbose, filenames, query_sequence, reads_per_blast, pident_of_blast, wordsize_of_blast, evalue_of_blast, output):
+	loop, cnt, db = 0, 0, tempfile.NamedTemporaryFile().name
+	proc = None
+	frame = {'primer_ss':{}, 'primer_as':{}}
 	for fn in filenames:
 		if verbose:
 			print(fn, file=sys.stderr)
@@ -52,16 +52,34 @@ def makeblastdb(verbose, filenames, query):
 				err(102, f'fastq {lns[0]} has different length of sequence and quality')
 			if lns[2] != '+':
 				err(103, f'fastq {lns[0]} misses "+"')
-			cnt += 1
 			id_seq = '>%s\n%s\n' % (lns[0][1:].replace(' ', '-'), lns[1])
+			if proc is None:
+				if verbose:
+					loop += 1
+					print('#makeblastdb: loop', loop, file=sys.stderr)
+				proc = subprocess.Popen(['makeblastdb', '-in', '-', '-dbtype', 'nucl', '-title', db, '-out', db], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
 			proc.stdin.write(str.encode(id_seq))
+			cnt += 1
+			if (cnt % reads_per_blast == 0):
+				blastn_and_count(verbose, db, reads_per_blast, query_sequence, pident_of_blast, wordsize_of_blast, evalue_of_blast, proc, frame)
+				proc = None
+	blastn_and_count(verbose, db, reads_per_blast, query_sequence, pident_of_blast, wordsize_of_blast, evalue_of_blast, proc, frame)
+	if output == '-':
+		fout = sys.stdout
+	else:
+		fout = open(output, 'w')
+	print('#LOC\tSS\tAS', file=fout)
+	loc_range = range(min(min(frame['primer_ss'].keys()), min(frame['primer_as'].keys())), max(max(frame['primer_ss'].keys()), max(frame['primer_as'].keys())) + 1)
+	for loc in loc_range:
+		print(loc, frame['primer_ss'].get(loc, 0), frame['primer_as'].get(loc, 0), sep='\t', file=fout)
+	fout.close()
+
+def blastn_and_count(verbose, db, cnt, query, pident, wordsize, evalue, proc, frame):
+	if proc is None: return
 	proc.stdin.close()
 	rtn = proc.wait()
 	if rtn != 0:
 		err(106, f'makeblastdb returned error code {rtn}')
-	return db, cnt
-
-def blastn(verbose, db, cnt, query, pident, wordsize, evalue):
 	proc = subprocess.Popen(['blastn', '-outfmt', '6', '-word_size', str(wordsize), '-ungapped', '-max_target_seqs', str(cnt), '-evalue', str(evalue), '-db', db, '-query', query], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
 	blastrtn = []
 	print('#blastn', file=sys.stderr)
@@ -85,7 +103,12 @@ def blastn(verbose, db, cnt, query, pident, wordsize, evalue):
 		print(len(blastrtn), file=sys.stderr)
 		print('#sort', file=sys.stderr)
 	blastrtn.sort(key=lambda fs : (fs[1], fs[0]))
-	return blastrtn
+	counter(blastrtn, frame)
+	for suffix in [ 'db', 'hr', 'in', 'ot', 'sq', 'tf', 'to']:
+		try:
+			os.remove(f'{db}.n{suffix}')
+		except FileNotFoundError:
+			pass
 
 def countprint(sid, lst, frame):
 	if sid == None:
@@ -134,9 +157,8 @@ def countprint(sid, lst, frame):
 	loc_cnt = frame[one_per_seq[0][0]]
 	loc_cnt[loc] = loc_cnt.get(loc, 0) + 1
 
-def counter(blast, output):
+def counter(blast, frame):
 	print('#count', file=sys.stderr)
-	frame = {'primer_ss':{}, 'primer_as':{}}
 	prev_read, lst = None, None
 	for fs in blast:
 		if fs[1] != prev_read:
@@ -146,15 +168,6 @@ def counter(blast, output):
 	countprint(prev_read, lst, frame)
 	if len(frame['primer_ss']) < 2 or len(frame['primer_as']) < 2:
 		err(105, 'there are not enough reads in the fastq file(s)')
-	loc_range = range(min(min(frame['primer_ss'].keys()), min(frame['primer_as'].keys())), max(max(frame['primer_ss'].keys()), max(frame['primer_as'].keys())) + 1)
-	if output == '-':
-		fout = sys.stderr
-	else:
-		fout = open(output, 'w')
-	print('#LOC\tSS\tAS', file=fout)
-	for loc in loc_range:
-		print(loc, frame['primer_ss'].get(loc, 0), frame['primer_as'].get(loc, 0), sep='\t', file=fout)
-	fout.close()
 
 def checkquery(filename):
 	ids = []
@@ -169,13 +182,7 @@ def main():
 	checkquery(args.query_sequence)
 	checkexe('blastn', '18199e01fff784af84fd4d9c102fcabb')
 	checkexe('makeblastdb', 'e958f13a0efb06c9f140b3065abd9ab6')
-	db, cnt = makeblastdb(args.verbose, args.fastq, args.query_sequence)
-	blastrtn = blastn(args.verbose, db, cnt, args.query_sequence, args.pident_of_blast, args.wordsize_of_blast, args.evalue_of_blast)
-	counter(blastrtn, args.output)
-	if args.verbose:
-		print(f'#done, remove blastdb at {db}.n*', file=sys.stderr)
-	for suffix in [ 'db', 'hr', 'in', 'ot', 'sq', 'tf', 'to']:
-		os.remove(f'{db}.n{suffix}')
+	blast_frag(args.verbose, args.fastq, args.query_sequence, 1000 * args.kilo_reads_per_blast, args.pident_of_blast, args.wordsize_of_blast, args.evalue_of_blast, args.output)
 
 if __name__ == '__main__':
 	main()
